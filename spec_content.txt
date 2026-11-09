@@ -1,0 +1,341 @@
+﻿=== PARAGRAPHS ===
+[Title] Waste Pickup & Recycling Platform: System Specification and Design
+[Subtitle] Working name: EcoCollect (a Yo-Waste-style on-demand waste management platform). Version 1.0 draft
+[Heading 1] 1. Introduction
+[Heading 2] 1.1 Purpose
+[First Paragraph] This document specifies the requirements and technical design for a two-sided mobile platform that connects households and businesses with waste haulers. It supports on-demand and scheduled pickups, sorted-waste diversion to recycling hubs, cashless mobile money payments, and extended services such as bin provisioning, consulting, and sanitation or water delivery.
+[Heading 2] 1.2 Scope
+[First Paragraph] In scope: Customer App, Hauler App, Admin and Dispatch Console, Recycling Hub Portal, backend services, payment integration, notifications, analytics. Out of scope for v1: municipal landfill weighbridge integration, carbon-credit trading, hardware IoT bin sensors (listed in the roadmap).
+[Heading 2] 1.3 Definitions
+[Heading 2] 1.4 Stakeholders
+[Heading 1] 2. Overall Description
+[Heading 2] 2.1 Product perspective
+[First Paragraph] A cloud-hosted platform with two native-feeling mobile apps (Customer and Hauler), a web-based Admin Console and Hub Portal, and a shared backend exposed through a REST API with real-time channels.
+[Heading 2] 2.2 User classes
+[Compact] Customer (household or business): requests pickups, manages subscription, pays, rates service.
+[Compact] Hauler/Driver: accepts or is assigned jobs, navigates, confirms collection.
+[Compact] Fleet Manager: manages drivers and vehicles for a hauler company.
+[Compact] Hub Operator: confirms receipt of sorted waste, records weights.
+[Compact] Dispatcher/Admin: monitors operations, resolves exceptions, configures pricing.
+[Heading 2] 2.3 Operating environment and constraints
+[Compact] Android first (dominant in target markets), iOS second; Android 8+ and low-end devices with 2 GB RAM.
+[Compact] Intermittent connectivity: apps must be offline-tolerant (queue actions, cache map tiles and routes).
+[Compact] Data-light design: compressed payloads, small images, SMS/USSD fallback for key actions.
+[Compact] Payments restricted to licensed mobile money aggregators and bank APIs.
+[Heading 2] 2.4 Assumptions and dependencies
+[Compact] A mobile money aggregator or direct provider APIs are available (with sandbox access).
+[Compact] Google Maps Platform or an OpenStreetMap-based provider for maps, geocoding, routing.
+[Compact] Households can describe location by pin drop, since formal addresses may be absent.
+[Heading 1] 3. Functional Requirements
+[First Paragraph] Priority: M = must, S = should, C = could.
+[Heading 2] 3.1 Customer App
+[Heading 2] 3.2 Hauler App
+[Heading 2] 3.3 Admin and Dispatch Console (web)
+[Heading 2] 3.4 Recycling Hub Portal
+[Heading 2] 3.5 Core business rules
+[Compact] A pickup is dispatched only to haulers in the customerΓÇÖs service zone with capacity and a valid vehicle.
+[Compact] Sorted streams (plastics, paper, organics, glass, metal) are routed to the nearest accepting hub; general waste goes to the designated landfill or transfer station.
+[Compact] Subscriptions generate pickups automatically at the start of each scheduling window; unpaid subscriptions enter a configurable grace period (e.g.┬á7 days) before suspension.
+[Compact] On-demand pickups require payment authorisation or wallet balance before dispatch, or post-pay for trusted accounts.
+[Compact] Hauler payouts are computed per completed job and released on a configurable cycle after customer confirmation or an auto-confirm timeout.
+[Compact] A pickup missed through hauler fault triggers re-dispatch within a set SLA and a service credit to the customer.
+[Heading 1] 4. Non-Functional Requirements
+[Heading 1] 5. System Architecture
+[Heading 2] 5.1 Architectural style
+[First Paragraph] A modular monolith to start (single deployable with clear domain modules), with high-load parts (location tracking, notifications, routing) split into separate services. This keeps early delivery fast while allowing later extraction to microservices.
+[Heading 2] 5.2 High-level components
+[Source Code]  Customer App   Hauler App   Admin Console   Hub Portal
+      \            |             |              /
+       +-----------+------+------+-------------+
+                          |
+                 API Gateway / Load Balancer
+                          |
+  +-----------------------+---------------------------+
+  | Core Backend (REST + WebSocket)                   |
+  |  Auth | Users | Pickups | Scheduling | Dispatch   |
+  |  Billing | Payments | Hubs | Catalog | Support   |
+  +------+------------+-------------+-----------------+
+         |            |             |
+   PostgreSQL     Redis (cache,   Message Broker
+   + PostGIS      geo, queues)    (RabbitMQ/Kafka)
+                                      |
+        +-----------+-----------+-----+------+
+        | Routing   | Location  | Notification|
+        | Service   | Ingest    | Service     |
+        +-----------+-----------+-------------+
+                          |
+  External: Maps/Routing API, Mobile Money APIs,
+            SMS/USSD gateway, Push (FCM/APNs), Object storage
+[Heading 2] 5.3 Technology stack (recommended)
+[Heading 2] 5.4 Backend modules
+[Heading 1] 6. Detailed Design
+[Heading 2] 6.1 Pickup state machine
+[First Paragraph] REQUESTED ΓåÆ PAYMENT_PENDING (if prepaid) ΓåÆ SCHEDULED / SEARCHING ΓåÆ ASSIGNED ΓåÆ EN_ROUTE ΓåÆ ARRIVED ΓåÆ COLLECTED ΓåÆ DELIVERED_TO_HUB ΓåÆ COMPLETED
+[Body Text] Exceptional states: CANCELLED, SKIPPED (access problem, bin not out), FAILED (hauler issue, triggers re-dispatch), DISPUTED.
+[Body Text] Every transition is an event stored in an append-only history table, which drives notifications, tracking, and audit.
+[Heading 2] 6.2 Dispatch and route optimisation
+[First Paragraph] On-demand matching
+[Compact] Find online haulers within a radius using a Redis geo index (GEOSEARCH).
+[Compact] Filter by zone, vehicle capacity, accepted streams, and current load.
+[Compact] Score candidates: score = w1 * ETA + w2 * detour_cost + w3 * rating + w4 * fairness.
+[Compact] Offer the job to the top candidate for 30 s; on decline or timeout, offer to the next. After N attempts, escalate to the dispatcher.
+[First Paragraph] Scheduled route planning (nightly batch)
+[Compact] Collect next-day pickups per zone and stream.
+[Compact] Solve a Capacitated Vehicle Routing Problem with Time Windows (CVRPTW) using OR-Tools or a routing engine, with constraints: vehicle capacity, shift length, customer time windows, and hub drop-off trips when full.
+[Compact] Publish routes to the Hauler App by early morning.
+[Compact] During the day, re-optimise incrementally when on-demand jobs, cancellations, or traffic changes occur.
+[Heading 2] 6.3 Waste sorting and diversion flow
+[Compact] Customer selects streams when scheduling; sorted streams may be collected on dedicated days or in compartmentalised vehicles.
+[Compact] Hauler marks each stream collected at the stop (optional weight).
+[Compact] System assigns each sorted load to the nearest hub that accepts the stream and has capacity.
+[Compact] Hauler is routed to the hub; hub operator confirms receipt and records weight and contamination.
+[Compact] Diversion rate = recycled and composted weight ├╖ total collected weight, reported per customer, zone, and period.
+[Compact] Optional incentives: discounts or credits for high-quality sorting; notices for repeated contamination.
+[Heading 2] 6.4 Payment design
+[First Paragraph] Customer collections
+[Compact] App creates an invoice or payment intent in PENDING status.
+[Compact] Backend calls the mobile money providerΓÇÖs collection API (push prompt to the customerΓÇÖs phone) with a unique idempotency reference.
+[Compact] Provider confirms asynchronously via webhook; backend verifies the signature, updates payment to SUCCESS or FAILED, and emits an event.
+[Compact] A reconciliation job queries pending payments and compares provider statements daily.
+[First Paragraph] Hauler payouts
+[Compact] Earnings accrue per completed job in an internal ledger; payouts are disbursed to the driverΓÇÖs mobile money wallet via the providerΓÇÖs disbursement API on a schedule or on request, subject to a minimum.
+[First Paragraph] Principles
+[Compact] Double-entry ledger for all money movements (customer wallet, platform revenue, hauler payable, hub payable).
+[Compact] All payment endpoints are idempotent; provider adapters are pluggable so new operators can be added without core changes.
+[Compact] The platform never stores PINs; only tokenised phone numbers and provider references.
+[Heading 2] 6.5 Real-time tracking
+[Compact] Hauler App sends GPS points every 5 to 15 s while on shift (adaptive to speed and battery) over WebSocket or MQTT, batching points when offline.
+[Compact] Location Ingest service writes the latest position to Redis and sampled history to PostGIS for audit and analytics.
+[Compact] Customer App subscribes to its pickup channel to receive position and ETA, so only the assigned haulerΓÇÖs location is visible, and only during an active job.
+[Heading 2] 6.6 Notifications
+[First Paragraph] Event-driven: pickup assigned, hauler en route, arrived, completed, payment received or failed, invoice ready, schedule reminders. Channel order: push, then SMS fallback for critical events when the user is offline or has no data.
+[Heading 1] 7. Data Design
+[Heading 2] 7.1 Core entities
+[Heading 2] 7.2 Key relationships
+[Compact] A Customer has many ServiceLocations; a ServiceLocation has at most one active Subscription.
+[Compact] A Subscription generates many Pickups; a Pickup has many PickupItems and PickupEvents.
+[Compact] A Route has many RouteStops, each referencing a Pickup or a Hub drop-off.
+[Compact] Payments belong to Invoices; every money movement creates balanced LedgerEntries.
+[Heading 2] 7.3 Data storage notes
+[Compact] PostGIS indexes (GiST) on locations and zone polygons; point-in-polygon for automatic zone assignment.
+[Compact] Partition PickupEvent and location history tables by month.
+[Compact] Archive data older than the retention period to cold storage; keep financial records per legal requirements.
+[Heading 1] 8. API Design
+[First Paragraph] REST over HTTPS with JSON, versioned under /api/v1, JWT bearer authentication, pagination, and idempotency keys on write operations that move money or change job state.
+[Body Text] Real-time channels: pickup.{id} (status, hauler position, ETA), hauler.{id} (job offers, route changes), admin.zone.{id} (operational feed).
+[Body Text] Sample request: create on-demand pickup
+[Source Code] POST /api/v1/pickups
+{
+  "location_id": "loc_123",
+  "type": "on_demand",
+  "items": [{"stream": "plastics", "est_volume": "2_bags"}],
+  "notes": "Bins behind the gate",
+  "payment_method": "momo"
+}
+[Heading 1] 9. Security, Privacy, and Compliance
+[Compact] Authentication: OTP with rate limiting and device binding; short-lived JWT plus refresh tokens; admin accounts require MFA.
+[Compact] Authorisation: role-based and ownership checks on every resource (customers see only their data; haulers see only assigned jobs).
+[Compact] Data protection: TLS everywhere, AES-256 at rest, field-level encryption for payout accounts, secrets in a managed vault.
+[Compact] Privacy: collect precise location only when needed; hauler tracking limited to shifts; customer phone numbers masked in hauler-customer calls.
+[Compact] Payment security: signed webhooks, idempotency, reconciliation, no storage of PINs or card data.
+[Compact] Application security: input validation, rate limiting, WAF, dependency scanning, regular penetration tests.
+[Compact] Fraud controls: fake pickups, duplicate payouts, GPS spoofing detection (speed and jump checks), photo and QR proof.
+[Compact] Compliance: follow national data protection and e-transactions laws, environmental and waste handling regulations, and mobile money provider requirements.
+[Compact] Backups and DR: daily full and continuous WAL backups; RPO 15 minutes, RTO 4 hours.
+[Heading 1] 10. Deployment and Operations
+[Heading 2] 10.1 Environments
+[First Paragraph] Development, Staging (sandbox payment and map keys), Production. Infrastructure managed as code; blue-green or rolling deployments with automated rollback.
+[Heading 2] 10.2 Infrastructure (initial)
+[Compact] Managed Kubernetes or container service (2 to 3 nodes) with autoscaling.
+[Compact] Managed PostgreSQL with read replica; managed Redis; managed broker.
+[Compact] CDN for static assets; object storage for media.
+[Compact] Region selection close to users to reduce latency, with a secondary region for backups.
+[Heading 2] 10.3 Monitoring and alerting
+[First Paragraph] Dashboards for API latency and errors, dispatch time-to-assign, payment success rate, queue depth, and app crash rate. Alerts page the on-call engineer for payment failures above threshold, dispatch stalls, and database health.
+[Heading 2] 10.4 Operational processes
+[First Paragraph] Hauler onboarding and training, customer support workflow (missed pickup within SLA), hub partnership agreements, and monthly service-quality reviews.
+[Heading 1] 11. Testing Strategy
+[Heading 1] 12. Key Performance Indicators
+[Compact] On-time pickup rate and missed-pickup rate
+[Compact] Average time to assign (on-demand) and ETA accuracy
+[Compact] Diversion rate (kg recycled or composted ├╖ kg collected)
+[Compact] Payment success rate and average days to collect
+[Compact] Customer retention, NPS, and subscription churn
+[Compact] Cost per collection and hauler utilisation
+[Heading 1] 13. Delivery Roadmap
+[Heading 1] 14. Risks and Mitigations
+[Heading 1] 15. Future Enhancements
+[First Paragraph] Dynamic pricing by volume and distance, pay-as-you-throw with weight-based billing, community collection points and agent networks, agricultural and municipal waste supply chains, a marketplace for recyclables, and open APIs for municipalities and NGOs.
+=== TABLES ===
+--- Table 1 ---
+Term | Meaning
+Pickup | A single waste collection job at a customer location
+Subscription | A recurring pickup plan billed periodically
+Hauler | A driver or fleet operator performing collections
+Hub | A recycling or composting facility that accepts sorted waste
+Stream | A waste category: general, plastics, paper, glass, metal, organics
+MoMo | Mobile money (e.g.┬áAirtel Money, TNM Mpamba, MTN MoMo, M-Pesa)
+--- Table 2 ---
+Stakeholder | Interest
+Households and businesses | Reliable, affordable, trackable collection
+Haulers and drivers | Steady jobs, efficient routes, fast payouts
+Recycling hubs | Clean, sorted, predictable material supply
+Platform operator | Revenue, utilisation, service quality
+Local authorities and regulators | Compliance, reduced illegal dumping, data
+--- Table 3 ---
+ID | Requirement | Pri
+C-01 | Register and log in using phone number with OTP; optional email | M
+C-02 | Set service location by pin drop on map, GPS auto-detect, or search; save multiple locations (home, shop) | M
+C-03 | Request an immediate (on-demand) pickup: choose waste type, estimated volume (bags/bin size), photo, notes | M
+C-04 | Schedule recurring weekly pickups: day, time window, start and pause dates | M
+C-05 | Declare waste streams per pickup (general, plastics, paper, organics, glass, metal) | M
+C-06 | View live status: requested, assigned, en route, arrived, collected, completed; live hauler location and ETA | M
+C-07 | Browse and change subscription packages | M
+C-08 | Pay by mobile money (push prompt or PIN approval); view receipts | M
+C-09 | View monthly invoices and payment history; download PDF | M
+C-10 | Leave operational notes (gate code, bin location, dog on premises) per location | M
+C-11 | Rate and review each pickup; report missed pickup or issue with photo | M
+C-12 | Request extended services: bin/dumpster rental, consulting, sanitation, water delivery | S
+C-13 | Recycling impact dashboard: kg diverted, rewards or credits earned | S
+C-14 | Push, SMS, and in-app notifications; language selection | M
+C-15 | Business accounts: multiple sites, multiple users, consolidated invoice | S
+--- Table 4 ---
+ID | Requirement | Pri
+H-01 | Driver onboarding with ID, licence, vehicle details; admin approval | M
+H-02 | Go online/offline; view assigned route and job list for the day | M
+H-03 | Accept or decline on-demand job offers within a time limit | M
+H-04 | Optimised multi-stop route with turn-by-turn navigation to each pickup pin | M
+H-05 | View customer notes, waste streams, photos, bin locations at each stop | M
+H-06 | Mark stop states: arrived, collected, skipped (with reason and photo) | M
+H-07 | Capture proof of collection (photo, optional QR scan of bin tag) | S
+H-08 | Record load weight or volume per stream at stop or at hub | S
+H-09 | Earnings screen, payout history, request payout to mobile money | M
+H-10 | Offline mode: cached route, queued status updates synced on reconnect | M
+H-11 | Vehicle capacity tracking and automatic hub destination suggestion when nearly full | S
+--- Table 5 ---
+ID | Requirement | Pri
+A-01 | Live map of customers, jobs, haulers; filters by zone and status | M
+A-02 | Manual job assignment, reassignment, cancellation | M
+A-03 | Zone, package, tariff, and promotion management | M
+A-04 | Customer, hauler, hub, and fleet management; role-based access | M
+A-05 | Payment reconciliation, refunds, failed-payment queue | M
+A-06 | Support ticketing for missed pickups and disputes | S
+A-07 | Reports: collections per zone, on-time rate, revenue, diversion rate, driver performance | M
+A-08 | Audit log of sensitive actions | M
+--- Table 6 ---
+ID | Requirement | Pri
+R-01 | Hub profile, accepted streams, operating hours, capacity | M
+R-02 | Incoming load list with expected stream and weight | M
+R-03 | Confirm receipt, record actual weight and contamination grade | M
+R-04 | Dispute or reject contaminated loads with reason | S
+R-05 | Monthly diversion and material reports | S
+--- Table 7 ---
+Category | Requirement
+Performance | API p95 under 500 ms; map and ETA updates every 5 to 10 s; app cold start under 4 s on low-end devices
+Scalability | Start at 10,000 customers and 300 haulers; scale horizontally to 500,000 customers without redesign
+Availability | 99.5% monthly uptime for core APIs; graceful degradation when maps or payment providers fail
+Reliability | Idempotent payment and job-status operations; no lost job updates (at-least-once delivery with deduplication)
+Offline and low bandwidth | Offline queue in Hauler App; compressed payloads; SMS fallback for pickup requests and confirmations
+Security | TLS 1.2+, encryption at rest, OWASP ASVS L2 controls, role-based access, secrets in a vault
+Privacy | Data minimisation, consent for location tracking, compliance with applicable data protection law
+Usability | Request a pickup in 3 taps or fewer; localisation; accessible contrast and font sizes
+Maintainability | Modular services, 80% unit test coverage on core domains, CI/CD, infrastructure as code
+Observability | Central logs, metrics, tracing, alerting on payment, dispatch, and queue health
+Battery and data | Adaptive GPS sampling in Hauler App; background location only during active shifts
+--- Table 8 ---
+Layer | Choice | Rationale
+Mobile apps | Flutter or React Native | One codebase for Android and iOS; strong offline and maps support
+Web consoles | React with TypeScript | Rich dashboards and live maps
+Backend | Node.js (NestJS) or Python (Django/FastAPI) | Fast development, mature ecosystem
+Database | PostgreSQL with PostGIS | Relational integrity plus geospatial queries
+Cache and geo | Redis | Hauler location, rate limits, job queues
+Messaging | RabbitMQ (v1) or Kafka (scale) | Async events: payments, notifications, dispatch
+Real-time | WebSocket or MQTT | Live tracking and job offers
+Storage | S3-compatible object store | Photos, invoices, proof of collection
+Maps and routing | Google Maps Platform, or OSM with OSRM/Valhalla | Navigation, geocoding, ETA; OSM lowers cost
+Infrastructure | Docker, Kubernetes or managed containers, Terraform | Repeatable deployments
+CI/CD and monitoring | GitHub Actions, Prometheus, Grafana, Sentry | Delivery and observability
+--- Table 9 ---
+Module | Responsibility
+Identity and Access | OTP login, JWT sessions, roles, device registration
+Customer and Location | Profiles, saved locations, notes, business accounts
+Pickup Management | Request lifecycle, state machine, proof of collection
+Scheduling | Recurring plans, generation of upcoming pickups, pauses
+Dispatch and Routing | Job matching, route optimisation, re-assignment
+Waste Sorting and Diversion | Stream catalogue, hub matching, load tracking, diversion metrics
+Billing | Packages, tariffs, invoices, credits, taxes
+Payments | Mobile money collections, payouts, reconciliation, webhooks
+Services Catalogue | Bins, consulting, sanitation, water delivery orders
+Notifications | Push, SMS, email templates and delivery tracking
+Reporting and Analytics | KPIs, exports, data warehouse feeds
+--- Table 10 ---
+Entity | Key fields
+User | id, phone, name, email, role, status, language, created_at
+CustomerProfile | user_id, type (household/business), business_name, tax_id
+ServiceLocation | id, customer_id, label, geo_point, address_text, zone_id, access_notes
+Zone | id, name, polygon, status
+Package | id, name, frequency, bin_size, price, streams_included
+Subscription | id, customer_id, location_id, package_id, status, start_date, next_billing_date
+Pickup | id, customer_id, location_id, type (on-demand/scheduled), status, window_start, window_end, assigned_job_id, notes
+PickupItem | id, pickup_id, stream, est_volume, actual_weight_kg
+PickupEvent | id, pickup_id, status, actor_id, geo_point, timestamp, payload
+Hauler | id, user_id, company_id, status, rating, payout_account
+Vehicle | id, company_id, plate, type, capacity_kg, capacity_m3
+Route | id, hauler_id, vehicle_id, date, status, planned_distance, planned_duration
+RouteStop | id, route_id, pickup_id/hub_id, sequence, planned_eta, actual_arrival
+Hub | id, name, geo_point, accepted_streams, capacity, hours
+HubDelivery | id, hub_id, route_id, stream, weight_kg, contamination_grade, confirmed_at
+Invoice | id, customer_id, period, amount, tax, status, due_date
+Payment | id, invoice_id, provider, provider_ref, amount, status, idempotency_key
+LedgerEntry | id, account, debit, credit, ref_type, ref_id, created_at
+Payout | id, hauler_id, amount, provider_ref, status
+ServiceOrder | id, customer_id, type (bin/consulting/sanitation/water), status, details
+Rating | id, pickup_id, score, comment
+Notification | id, user_id, channel, template, status, sent_at
+AuditLog | id, actor_id, action, entity, timestamp, metadata
+--- Table 11 ---
+Area | Method and endpoint | Purpose
+Auth | POST /auth/otp/request, POST /auth/otp/verify | Phone OTP login
+Locations | GET/POST /locations, PATCH /locations/{id} | Manage service locations and notes
+Pickups | POST /pickups | Create on-demand pickup
+Pickups | GET /pickups, GET /pickups/{id} | List and track pickups
+Pickups | POST /pickups/{id}/cancel, POST /pickups/{id}/rating | Cancel and rate
+Subscriptions | GET /packages, POST /subscriptions, PATCH /subscriptions/{id} | Subscribe, pause, change plan
+Billing | GET /invoices, GET /invoices/{id}/pdf | Invoices
+Payments | POST /payments, GET /payments/{id} | Initiate and check payment
+Webhooks | POST /webhooks/momo/{provider} | Provider callbacks (signed)
+Hauler | POST /hauler/status, GET /hauler/jobs, POST /hauler/jobs/{id}/accept | Availability and job handling
+Hauler | GET /hauler/routes/today, POST /hauler/stops/{id}/complete | Route execution
+Hauler | GET /hauler/earnings, POST /hauler/payouts | Earnings and payouts
+Hubs | GET /hubs/deliveries, POST /hubs/deliveries/{id}/confirm | Hub receipt confirmation
+Services | POST /service-orders | Bins, consulting, sanitation, water
+Admin | /admin/* | Zones, tariffs, assignments, reports (RBAC)
+--- Table 12 ---
+Level | Approach
+Unit | Domain logic: pricing, state machine, scheduling, ledger
+Integration | Database, broker, payment sandbox, map API mocks
+API/contract | OpenAPI-driven tests; provider adapter contract tests
+End-to-end | Customer request through hauler completion, payment, and hub confirmation
+Performance | Load test dispatch and location ingest (e.g.┬á1,000 concurrent haulers)
+Field testing | Low-end devices, poor networks, GPS accuracy in dense areas
+Security | SAST/DAST, penetration test before launch
+UAT | Pilot in one zone with real customers and haulers
+--- Table 13 ---
+Phase | Duration | Deliverables
+0. Discovery | 3 to 4 weeks | Zone survey, hauler and hub partnerships, regulatory review, MoMo provider onboarding
+1. MVP | 3 to 4 months | Customer and Hauler apps, on-demand and scheduled pickups, MoMo payments, basic admin console, manual dispatch
+2. Pilot | 1 to 2 months | One-zone launch, support processes, feedback loop
+3. Optimisation | 2 to 3 months | Automated routing, hub portal, sorting and diversion tracking, invoices and PDF
+4. Expansion | Ongoing | Extended services (bins, water, consulting), business accounts, rewards, multi-city
+5. Advanced | Future | IoT bin sensors, weighbridge integration, carbon and plastic credits, municipal data APIs
+--- Table 14 ---
+Risk | Mitigation
+Poor connectivity | Offline-first Hauler App, SMS/USSD fallback, cached maps
+Informal addresses | Pin-drop plus landmark notes and photos; saved bin locations
+Payment failures or provider downtime | Multiple provider adapters, retries, reconciliation, post-pay option
+Low sorting compliance | Incentives, education notifications, contamination feedback
+Hauler no-shows | Ratings, penalties, automatic re-dispatch, backup drivers
+Hub capacity or rejection | Real-time hub capacity, alternate hub routing
+GPS and battery drain | Adaptive sampling, shift-only tracking
+Regulatory change | Early engagement with authorities, configurable rules
+Fraud and data misuse | Audit logs, anomaly detection, strict access control
